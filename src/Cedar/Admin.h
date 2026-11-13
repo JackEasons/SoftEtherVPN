@@ -259,6 +259,7 @@ struct RPC_RADIUS
 	UINT RadiusPort;					// Radius port number
 	char RadiusSecret[MAX_PASSWORD_LEN + 1];	// Secret key
 	UINT RadiusRetryInterval;			// Radius retry interval
+	UINT RadiusRetryTimeout;			// Radius retry timeout
 };
 
 // Specify the HUB
@@ -436,6 +437,7 @@ struct RPC_CREATE_LINK
 	CLIENT_AUTH *ClientAuth;			// Client authentication data
 	POLICY Policy;						// Policy
 	bool CheckServerCert;				// Validate the server certificate
+	bool AddDefaultCA;					// Use default trust store
 	X *ServerCert;						// Server certificate
 };
 

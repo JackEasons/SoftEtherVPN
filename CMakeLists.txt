@@ -1,9 +1,9 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.15)
 
 set(BUILD_NUMBER CACHE STRING "The number of the current build.")
 
 if ("${BUILD_NUMBER}" STREQUAL "")
-	set(BUILD_NUMBER "5180")
+	set(BUILD_NUMBER "5189")
 endif()
 
 if (BUILD_NUMBER LESS 5180)
@@ -13,6 +13,13 @@ if (BUILD_NUMBER LESS 5180)
 		"For detailed info: https://github.com/SoftEtherVPN/SoftEtherVPN/issues/1392#issuecomment-867348281")
 endif()
 
+#
+# Link MSVC runtime statically
+# this should be revisited after installer migration to MSI
+#
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 project("SoftEther VPN"
   VERSION "5.02.${BUILD_NUMBER}"
   LANGUAGES C
@@ -20,8 +27,11 @@ project("SoftEther VPN"
 
 set(CMAKE_C_STANDARD 99)
 
-set(TOP_DIRECTORY ${CMAKE_SOURCE_DIR})
-set(BUILD_DIRECTORY ${CMAKE_BINARY_DIR})
+# Subproject-safe paths: the Android entry (SoftEtherVPN-Android/CMakeLists.txt)
+# adds this root via add_subdirectory; for a plain top-level build CURRENT
+# equals SOURCE/BINARY dir exactly as before.
+set(TOP_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set(BUILD_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # We define a dedicated variable because CMAKE_BUILD_TYPE can have different
 # configurations than "Debug" and "Release", such as "RelWithDebInfo".
@@ -36,13 +46,17 @@ if(EXISTS "${TOP_DIRECTORY}/.git" AND NOT EXISTS "${TOP_DIRECTORY}/src/libhamcor
     message (FATAL_ERROR "Submodules are not initialized. Run\n\tgit submodule update --init --recursive")
 endif()
 
+if(WIN32 AND VCPKG_TARGET_TRIPLET AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+  message (FATAL_ERROR "vcpkg not installed or integrated with Visual Studio. Install it and run\n\tvcpkg integrate install")
+endif()
+
 if(UNIX)
   include(GNUInstallDirs)
 
   #
   # use rpath for locating installed libraries
   #
-  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
   set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
   include(CheckIncludeFile)

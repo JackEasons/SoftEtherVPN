@@ -59,7 +59,7 @@ const PROTO_OPTION *OvsOptions()
 		{ .Name = "Obfuscation", .Type = PROTO_OPTION_BOOL, .Bool = false },
 		{ .Name = "ObfuscationMask", .Type = PROTO_OPTION_STRING, .String = "" },
 		{ .Name = "PingSendInterval", .Type = PROTO_OPTION_UINT32, .UInt32 = 3000 },
-		{ .Name = "PushDummyIPv4AddressOnL2Mode", .Type = PROTO_OPTION_BOOL, .Bool = true },
+		{ .Name = "PushDummyIPv4AddressOnL2Mode", .Type = PROTO_OPTION_BOOL, .Bool = false },
 		{ .Name = "Timeout", .Type = PROTO_OPTION_UINT32, .UInt32 = 30000 },
 		{ .Name = NULL, .Type = PROTO_OPTION_UNKNOWN }
 	};
@@ -147,7 +147,7 @@ bool OvsProcessData(void *param, TCP_RAW_DATA *in, FIFO *out)
 		payload_size = READ_USHORT(FifoPtr(fifo));
 		packet_size = payload_size + sizeof(USHORT);
 
-		if (payload_size == 0 || packet_size > sizeof(buf))
+		if (payload_size == 0 || payload_size > (sizeof(buf) - sizeof(USHORT)))
 		{
 			ret = false;
 			Debug("OvsProcessData(): Invalid payload size: %u bytes\n", payload_size);
@@ -824,6 +824,10 @@ void OvsProcessRecvControlPacket(OPENVPN_SERVER *s, OPENVPN_SESSION *se, OPENVPN
 				}
 
 				c->SslPipe = NewSslPipeEx(true, s->Cedar->ServerX, s->Cedar->ServerK, s->Dh, true, &c->ClientCert);
+				if (c->SslPipe == NULL)
+				{
+					return;
+				}
 			}
 			Unlock(s->Cedar->lock);
 
@@ -960,12 +964,67 @@ void OvsProcessRecvControlPacket(OPENVPN_SERVER *s, OPENVPN_SESSION *se, OPENVPN
 
 				if (StartWith(tmp, "PUSH_REQUEST"))
 				{
-					WriteFifo(send_fifo, se->PushReplyStr, StrLen(se->PushReplyStr));
+					OvsSendPushReply(c, se->PushReplyStr);
 				}
 			}
 		}
 		break;
 	}
+}
+
+// Send the PUSH_REPLY string to the client.
+// The client reads each control message into a fixed-size buffer, so a long string is sent
+// as multiple messages, each ending with "push-continuation", like the OpenVPN server does.
+void OvsSendPushReply(OPENVPN_CHANNEL *c, char *str)
+{
+	TOKEN_LIST *t;
+	UINT i;
+	bool multi = false;
+	char msg[OPENVPN_PUSH_REPLY_MAX_SIZE];
+	char *more = ",push-continuation 2";
+	// Validate arguments
+	if (c == NULL || c->SslPipe == NULL || IsEmptyStr(str))
+	{
+		return;
+	}
+
+	t = ParseToken(str, ",");
+	if (t == NULL)
+	{
+		return;
+	}
+
+	// The first token is "PUSH_REPLY" itself
+	StrCpy(msg, sizeof(msg), "PUSH_REPLY");
+
+	for (i = 1; i < t->NumTokens; i++)
+	{
+		char *option = t->Token[i];
+
+		if (StrLen(msg) + 1 + StrLen(option) + StrLen(more) >= sizeof(msg))
+		{
+			StrCat(msg, sizeof(msg), more);
+
+			// Each message must be written as a separate TLS record
+			WriteFifo(c->SslPipe->SslInOut->SendFifo, msg, StrSize(msg));
+			SyncSslPipe(c->SslPipe);
+
+			StrCpy(msg, sizeof(msg), "PUSH_REPLY");
+			multi = true;
+		}
+
+		StrCat(msg, sizeof(msg), ",");
+		StrCat(msg, sizeof(msg), option);
+	}
+
+	if (multi)
+	{
+		StrCat(msg, sizeof(msg), ",push-continuation 1");
+	}
+
+	WriteFifo(c->SslPipe->SslInOut->SendFifo, msg, StrSize(msg));
+
+	FreeToken(t);
 }
 
 // Calculate the proper MSS
@@ -1902,6 +1961,10 @@ BUF *OvsBuildPacket(OPENVPN_PACKET *p)
 
 	// NumAck
 	num_ack = MIN(p->NumAck, OPENVPN_MAX_NUMACK);
+	if (p->OpCode != OPENVPN_P_ACK_V1)
+	{
+		num_ack = MIN(num_ack, OPENVPN_MAX_NUMACK_NONACK);
+	}
 	WriteBufChar(b, (UCHAR)num_ack);
 
 	if (p->NumAck >= 1)
@@ -1982,7 +2045,7 @@ OPENVPN_PACKET *OvsParsePacket(UCHAR *data, UINT size)
 
 	ret->NumAck = uc;
 
-	if (ret->NumAck > 4)
+	if (ret->NumAck > OPENVPN_MAX_NUMACK)
 	{
 		goto LABEL_ERROR;
 	}
@@ -2336,7 +2399,7 @@ void OvsRecvPacket(OPENVPN_SERVER *s, LIST *recv_packet_list, UINT protocol)
 						{
 							if (se->IpcAsync->Ipc != NULL)
 							{
-								char option_str[4096];
+								char option_str[OPENVPN_PUSH_REPLY_STR_SIZE];
 								char l3_options[MAX_SIZE];
 
 								// Successful in VPN connection
@@ -2486,8 +2549,8 @@ void OvsRecvPacket(OPENVPN_SERVER *s, LIST *recv_packet_list, UINT protocol)
 											if (r->Exists)
 											{
 												Format(l3_options, sizeof(l3_options),
-												       ",route %r %r vpn_gateway",
-												       &r->Network, &r->SubnetMask);
+												       ",route %r %r %r",
+												       &r->Network, &r->SubnetMask, &r->Gateway);
 
 												StrCat(option_str, sizeof(option_str), l3_options);
 											}
@@ -2520,7 +2583,7 @@ void OvsRecvPacket(OPENVPN_SERVER *s, LIST *recv_packet_list, UINT protocol)
 								// Note that pushing unknown options from server does not trigger fatal errors.
 								StrCat(option_str, sizeof(option_str), ",block-outside-dns");
 
-								WriteFifo(c->SslPipe->SslInOut->SendFifo, option_str, StrSize(option_str));
+								OvsSendPushReply(c, option_str);
 
 								Debug("Push Str: %s\n", option_str);
 								OvsLog(s, se, c, "LO_PUSH_REPLY", option_str);
@@ -2554,9 +2617,16 @@ void OvsRecvPacket(OPENVPN_SERVER *s, LIST *recv_packet_list, UINT protocol)
 								Debug("OpenVPN Channel %u Failed.\n", j);
 								OvsLog(s, se, c, "LO_CHANNEL_FAILED");
 
-								// Return the AUTH_FAILED
-								str = "AUTH_FAILED";
-								WriteFifo(c->SslPipe->SslInOut->SendFifo, str, StrSize(str));
+								if ((se->IpcAsync->ErrorCode == ERR_AUTHTYPE_NOT_SUPPORTED) ||
+									(se->IpcAsync->ErrorCode == ERR_AUTH_FAILED) ||
+									(se->IpcAsync->ErrorCode == ERR_PROXY_AUTH_FAILED) ||
+									(se->IpcAsync->ErrorCode == ERR_USER_AUTHTYPE_NOT_PASSWORD) ||
+									(se->IpcAsync->ErrorCode == ERR_NOT_SUPPORTED_AUTH_ON_OPENSOURCE))
+								{
+									// Return the AUTH_FAILED
+									str = "AUTH_FAILED";
+									WriteFifo(c->SslPipe->SslInOut->SendFifo, str, StrSize(str));
+								}
 
 								s->SessionEstablishedCount++;
 

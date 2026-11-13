@@ -19,6 +19,7 @@
 #define	IPC_DHCP_TIMEOUT				(5 * 1000)
 #define	IPC_DHCP_MIN_LEASE				5
 #define	IPC_DHCP_DEFAULT_LEASE			3600
+#define	IPC_DHCP_MAX_RESEND_INTERVAL	(3 * 1000)
 
 #define	IPC_MAX_PACKET_QUEUE_LEN		10000
 
@@ -91,6 +92,7 @@ struct IPC_PARAM
 	UINT Mss;
 	bool IsL3Mode;
 	X *ClientCertificate;
+	bool RadiusOK;
 	UINT Layer;
 };
 
@@ -148,6 +150,7 @@ struct IPC
 	SHARED_BUFFER *IpcSessionSharedBuffer;	// A shared buffer between IPC and Session
 	IPC_SESSION_SHARED_BUFFER_DATA *IpcSessionShared;	// Shared data between IPC and Session
 	UINT Layer;
+	UINT DhcpDiscoverTimeoutMs;			// Timeut to wait for DHCP server response on DISCOVER request
 
 	// IPv6 stuff
 	QUEUE *IPv6ReceivedQueue;			// IPv6 reception queue
@@ -155,7 +158,7 @@ struct IPC
 	LIST *IPv6NeighborTable;			// Neighbor Discovery Table
 	LIST *IPv6RouterAdvs;				// Router offered prefixes
 	UINT64 IPv6ClientEUI;				// The EUI of the client (for the SLAAC autoconf)
-	UINT64 IPv6ServerEUI;				// The EUI of the server (from the RA discovery)
+	UINT64 IPv6ServerEUI;				// The EUI of the server (from the IPC Mac address)
 };
 
 // MS-CHAPv2 authentication information
@@ -180,7 +183,7 @@ struct IPC_IPV6_ROUTER_ADVERTISEMENT
 IPC *NewIPC(CEDAR *cedar, char *client_name, char *postfix, char *hubname, char *username, char *password, char *wg_key,
             UINT *error_code, IP *client_ip, UINT client_port, IP *server_ip, UINT server_port,
             char *client_hostname, char *crypt_name,
-            bool bridge_mode, UINT mss, EAP_CLIENT *eap_client, X *client_certificate,
+            bool bridge_mode, UINT mss, EAP_CLIENT *eap_client, X *client_certificate, bool external_auth,
             UINT layer);
 IPC *NewIPCByParam(CEDAR *cedar, IPC_PARAM *param, UINT *error_code);
 IPC *NewIPCBySock(CEDAR *cedar, SOCK *s, void *mac_address);
@@ -233,7 +236,7 @@ bool IPCIPv6CheckExistingLinkLocal(IPC *ipc, UINT64 eui);
 // RA
 void IPCIPv6AddRouterPrefixes(IPC *ipc, ICMPV6_OPTION_LIST *recvPrefix, UCHAR *macAddress, IP *ip);
 bool IPCIPv6CheckUnicastFromRouterPrefix(IPC *ipc, IP *ip, IPC_IPV6_ROUTER_ADVERTISEMENT *matchedRA);
-UINT64 IPCIPv6GetServerEui(IPC *ipc);
+bool IPCSendIPv6RouterSoliciation(IPC *ipc, bool blocking);
 // Data flow
 BLOCK *IPCIPv6Recv(IPC *ipc);
 void IPCIPv6Send(IPC *ipc, void *data, UINT size);

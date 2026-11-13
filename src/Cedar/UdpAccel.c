@@ -338,6 +338,8 @@ void UdpAccelSend(UDP_ACCEL *a, UCHAR *data, UINT data_size, UCHAR flag, UINT ma
 	UINT size = 0;
 	UINT64 tmp;
 	UINT ret;
+	UINT u32;
+	USHORT u16;
 	// Validate arguments
 	if (a == NULL || (data_size != 0 && data == NULL))
 	{
@@ -367,8 +369,8 @@ void UdpAccelSend(UDP_ACCEL *a, UCHAR *data, UINT data_size, UCHAR flag, UINT ma
 	}
 
 	// Cookie
-	tmp = Endian32(a->YourCookie);
-	Copy(buf, &tmp, sizeof(UINT));
+	u32 = Endian32(a->YourCookie);
+	Copy(buf, &u32, sizeof(UINT));
 	buf += sizeof(UINT);
 	size += sizeof(UINT);
 
@@ -385,8 +387,8 @@ void UdpAccelSend(UDP_ACCEL *a, UCHAR *data, UINT data_size, UCHAR flag, UINT ma
 	size += sizeof(UINT64);
 
 	// Size
-	tmp = Endian16(data_size);
-	Copy(buf, &tmp, sizeof(USHORT));
+	u16 = Endian16(data_size);
+	Copy(buf, &u16, sizeof(USHORT));
 	buf += sizeof(USHORT);
 	size += sizeof(USHORT);
 
@@ -817,6 +819,23 @@ void UdpAccelSetTick(UDP_ACCEL *a, UINT64 tick64)
 	a->Now = tick64;
 }
 
+// Link-local peers must use the interface bound by the UDP socket, not the
+// scope reported by the TCP connection (which may refer to another interface).
+static void UdpAccelSetPeerScope(UDP_ACCEL *a)
+{
+	if ((GetIPAddrType6(&a->MyIp) & IPV6_ADDR_LOCAL_UNICAST) && a->MyIp.ipv6_scope_id != 0)
+	{
+		if (GetIPAddrType6(&a->YourIp) & IPV6_ADDR_LOCAL_UNICAST)
+		{
+			a->YourIp.ipv6_scope_id = a->MyIp.ipv6_scope_id;
+		}
+		if (GetIPAddrType6(&a->YourIpReported) & IPV6_ADDR_LOCAL_UNICAST)
+		{
+			a->YourIpReported.ipv6_scope_id = a->MyIp.ipv6_scope_id;
+		}
+	}
+}
+
 // Initialize the server-side
 bool UdpAccelInitServer(UDP_ACCEL *a, UCHAR *key, IP *detected_ip, IP *reported_ip, USHORT port)
 {
@@ -849,6 +868,7 @@ bool UdpAccelInitServer(UDP_ACCEL *a, UCHAR *key, IP *detected_ip, IP *reported_
 
 	Copy(&a->YourIp, detected_ip, sizeof(a->YourIp));
 	Copy(&a->YourIpReported, reported_ip, sizeof(a->YourIpReported));
+	UdpAccelSetPeerScope(a);
 
 	a->YourPort = a->YourPortReported = port;
 
@@ -891,6 +911,7 @@ bool UdpAccelInitClient(UDP_ACCEL *a, UCHAR *key, IP *detected_ip, IP *reported_
 
 	Copy(&a->YourIp, detected_ip, sizeof(a->YourIp));
 	Copy(&a->YourIpReported, reported_ip, sizeof(a->YourIpReported));
+	UdpAccelSetPeerScope(a);
 
 	a->YourPort = a->YourPortReported = port;
 

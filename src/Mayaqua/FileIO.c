@@ -24,6 +24,7 @@ static char exe_file_name[MAX_SIZE] = "/tmp/a.out";
 static wchar_t exe_file_name_w[MAX_SIZE] = L"/tmp/a.out";
 static LIST *hamcore = NULL;
 static HAMCORE *hamcore_io = NULL;
+static char hamcore_path[MAX_SIZE] = "";
 
 #define	NUM_CRC32_TABLE	256
 static UINT crc32_table[NUM_CRC32_TABLE];
@@ -805,6 +806,21 @@ BUF *ReadHamcore(char *name)
 	return buf;
 }
 
+// Set the full path of the hamcore.se2 archive (for platforms where the
+// archive is not located next to the executable; must be called before
+// InitMayaqua())
+void SetHamcorePath(char *path)
+{
+	if (path == NULL)
+	{
+		hamcore_path[0] = 0;
+
+		return;
+	}
+
+	StrCpy(hamcore_path, sizeof(hamcore_path), path);
+}
+
 // Initialization of HamCore file system
 void InitHamcore()
 {
@@ -814,6 +830,17 @@ void InitHamcore()
 	}
 
 	hamcore = NewList(CompareHamcore);
+
+	if (hamcore_path[0] != 0)
+	{
+		hamcore_io = HamcoreOpen(hamcore_path);
+		if (hamcore_io != NULL)
+		{
+			Debug("InitHamcore(): Loaded from \"%s\".\n", hamcore_path);
+
+			return;
+		}
+	}
 #ifdef HAMCORE_FILE_PATH
 	hamcore_io = HamcoreOpen(HAMCORE_FILE_PATH);
 	if (hamcore_io != NULL)
@@ -2124,6 +2151,24 @@ IO *FileOpenEx(char *name, bool write_mode, bool read_lock)
 
 	return ret;
 }
+
+// Replace the specified character in the string with a new character
+wchar_t *UniReplaceCharW(wchar_t *src, UINT size, wchar_t c, wchar_t  newc) {
+	if (src == NULL)
+	{
+		return NULL;
+	}
+	for (; *src; src++, size -= sizeof(wchar_t)) {
+		if (size < sizeof(wchar_t)) {
+			break;
+		}
+		if (*src == c) {
+			*src = newc;
+		}
+	}
+	return (wchar_t *)src;
+}
+
 IO *FileOpenExW(wchar_t *name, bool write_mode, bool read_lock)
 {
 	wchar_t tmp[MAX_SIZE];
@@ -2140,9 +2185,12 @@ IO *FileOpenExW(wchar_t *name, bool write_mode, bool read_lock)
 		IO *o = ZeroMalloc(sizeof(IO));
 		name++;
 		UniStrCpy(o->NameW, sizeof(o->NameW), name);
+#ifdef	OS_WIN32
+		UniReplaceCharW(o->NameW, sizeof(o->NameW), L'\\', L'/');		// Path separator "/" is used.
+#endif	// OS_WIN32
 		UniToStr(o->Name, sizeof(o->Name), o->NameW);
 		o->HamMode = true;
-		o->HamBuf = ReadHamcoreW(name);
+		o->HamBuf = ReadHamcoreW(o->NameW);
 		if (o->HamBuf == NULL)
 		{
 			Free(o);

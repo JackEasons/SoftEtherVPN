@@ -19,6 +19,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#define MLOG(...)	__android_log_print(ANDROID_LOG_INFO, "SETH", __VA_ARGS__)
+#else	// __ANDROID__
+#define MLOG(...)
+#endif	// __ANDROID__
+
 // Locking for call the token handling function
 LOCK *token_lock = NULL;
 static char *default_spliter = " ,\t\r\n";
@@ -2062,11 +2069,11 @@ void EnSafeHttpHeaderValueStr(char *str, char replace)
 	length = StrLen(str);
 	while (index < length)
 	{
-		if (str[index] == '\r' || str[index] == '\n')
+		if ((str[index] == '\r' || str[index] == '\n') &&  length - index > 1)
 		{
 			if (replace == ' ')
 			{
-				Move(&str[index], &str[index + 1], length - index);
+				Move(&str[index], &str[index + 1], length - index - 1);
 			}
 			else
 			{
@@ -2075,12 +2082,12 @@ void EnSafeHttpHeaderValueStr(char *str, char replace)
 		}
 		else if (str[index] == '\\')
 		{
-			if (str[index + 1] == 'r' || str[index + 1] == 'n')
+			if ((str[index + 1] == 'r' || str[index + 1] == 'n') && length - index > 2)
 			{
 				if (replace == ' ')
 				{
-					Move(&str[index], &str[index + 2], length - index);
-					index--;
+					Move(&str[index], &str[index + 2], length - index - 2);
+					index++;
 				}
 				else
 				{
@@ -2659,7 +2666,9 @@ void PrintStr(char *str)
 		return;
 	}
 
-#ifdef	OS_UNIX
+#ifdef	__ANDROID__
+	MLOG("%s", str);
+#elif	defined(OS_UNIX)
 	fputs(str, stdout);
 #else	// OS_UNIX
 	unistr = CopyStrToUni(str);

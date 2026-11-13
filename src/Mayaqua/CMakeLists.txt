@@ -16,14 +16,60 @@ set_target_properties(mayaqua
   RUNTIME_OUTPUT_DIRECTORY "${BUILD_DIRECTORY}"
 )
 
-find_package(OpenSSL REQUIRED)
+if(NOT OPENSSL_FOUND OR NOT TARGET OpenSSL::SSL)
+  find_package(OpenSSL REQUIRED)
+endif()
+
+if(OPENSSL_VERSION VERSION_GREATER_EQUAL "3.0.0" AND OPENSSL_VERSION VERSION_LESS "4.0.0")
+  set(OQS_ENABLE ON CACHE BOOL "By setting this to OFF, Open Quantum Safe algorithms will not be built in")
+else()
+  # Disable oqsprovider when OpenSSL version < 3
+  set(OQS_ENABLE OFF)
+endif()
+
+if(OQS_ENABLE)
+  set(OQS_BUILD_ONLY_LIB ON CACHE BOOL "Set liboqs to build only the library (no tests)")
+  set(BUILD_TESTING OFF CACHE BOOL "By setting this to OFF, no tests or examples will be compiled.")
+  set(OQS_PROVIDER_BUILD_STATIC ON CACHE BOOL "Build a static library instead of a shared library") # Build oqsprovider as a static library (defaults to shared)
+  list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/src/Mayaqua/3rdparty/")
+
+    # Disable all other KEM families
+  set(OQS_ENABLE_KEM_FRODOKEM OFF)
+  set(OQS_ENABLE_KEM_NTRUPRIME OFF)
+  set(OQS_ENABLE_KEM_NTRU OFF)
+  set(OQS_ENABLE_KEM_CLASSIC_MCELIECE OFF)
+  set(OQS_ENABLE_KEM_HQC OFF)
+  set(OQS_ENABLE_KEM_BIKE OFF)
+
+  # Disable all SIG families
+  set(OQS_ENABLE_SIG_ML_DSA OFF)
+  set(OQS_ENABLE_SIG_FALCON OFF)
+  set(OQS_ENABLE_SIG_DILITHIUM OFF)
+  set(OQS_ENABLE_SIG_SPHINCS OFF)
+  set(OQS_ENABLE_SIG_MAYO OFF)
+  set(OQS_ENABLE_SIG_CROSS OFF)
+  set(OQS_ENABLE_SIG_UOV OFF)
+  set(OQS_ENABLE_SIG_SNOVA OFF)
+  set(OQS_ENABLE_SIG_SLH_DSA OFF)
+
+  add_subdirectory(3rdparty/liboqs)
+  add_subdirectory(3rdparty/oqs-provider)
+
+  target_include_directories(oqsprovider PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/3rdparty/liboqs/include)
+  set_property(TARGET oqsprovider PROPERTY POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(mayaqua PRIVATE oqsprovider)
+else()
+  add_definitions(-DSKIP_OQS_PROVIDER)
+endif()
 
 include(CheckSymbolExists)
 
 set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
 set(CMAKE_REQUIRED_LIBRARIES OpenSSL::Crypto)
+set(CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL)
 
 check_symbol_exists(EVP_PKEY_get_raw_public_key "openssl/evp.h" HAVE_EVP_PKEY_GET_RAW_PUBLIC_KEY)
+check_symbol_exists(SSL_CTX_set_num_tickets "openssl/ssl.h" HAVE_SSL_CTX_SET_NUM_TICKETS)
 
 unset(CMAKE_REQUIRED_INCLUDES)
 unset(CMAKE_REQUIRED_LIBRARIES)
@@ -31,6 +77,12 @@ unset(CMAKE_REQUIRED_LIBRARIES)
 if(NOT HAVE_EVP_PKEY_GET_RAW_PUBLIC_KEY)
   message(FATAL_ERROR "Required EVP_PKEY_get_raw_public_key() not found in OpenSSL library!")
 endif()
+
+if (HAVE_SSL_CTX_SET_NUM_TICKETS)
+  add_compile_definitions(HAVE_SSL_CTX_SET_NUM_TICKETS)
+endif()
+
+
 
 find_package(ZLIB REQUIRED)
 
@@ -40,9 +92,10 @@ target_include_directories(mayaqua PUBLIC ${OPENSSL_INCLUDE_DIR})
 target_link_libraries(mayaqua
   PRIVATE
     libhamcore
-    OpenSSL::SSL
     OpenSSL::Crypto
     ZLIB::ZLIB
+  PUBLIC
+    OpenSSL::SSL
 )
 
 if(WIN32)
@@ -54,6 +107,7 @@ if(WIN32)
 
   target_link_libraries(mayaqua
     PRIVATE
+      "crypt32.lib"
       "DbgHelp.Lib"
       "dwmapi.lib"
       "iphlpapi.lib"
@@ -62,12 +116,18 @@ if(WIN32)
       "Secur32.Lib"
       "setupapi.lib"
       "winmm.lib"
+      "ws2_32.lib"
       "WtsApi32.Lib"
     )
 endif()
 
 if(UNIX)
   find_package(Threads REQUIRED)
+
+  if(ANDROID)
+    # __android_log_print (Mayaqua's PrintStr path)
+    target_link_libraries(mayaqua PRIVATE log)
+  endif()
 
   # In some cases libiconv is not included in libc
   find_library(LIB_ICONV iconv)
@@ -83,11 +143,26 @@ if(UNIX)
       $<$<BOOL:${LIB_RT}>:${LIB_RT}>
   )
 
-  if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(armv7l|aarch64|s390x)$" OR NOT HAVE_SYS_AUXV OR SKIP_CPU_FEATURES)
+  if (NOT HAVE_SYS_AUXV OR SKIP_CPU_FEATURES)
     add_definitions(-DSKIP_CPU_FEATURES)
+  elseif(${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(amd64|i386)")
+    message("cpu_features is not available on FreeBSD/${CMAKE_SYSTEM_PROCESSOR}")
+    add_definitions(-DSKIP_CPU_FEATURES)
+  elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|x86_64)")
+    # macOS runs only on Intel or ARM architecrues, should not reach here
+    add_definitions(-DSKIP_CPU_FEATURES)
+  elseif(${CMAKE_SYSTEM_NAME} STREQUAL "SunOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OpenBSD")
+    message("cpu_features is not available on ${CMAKE_SYSTEM_NAME}")
+    add_definitions(-DSKIP_CPU_FEATURES)
+  elseif(USE_SYSTEM_CPU_FEATURES)
+    CHECK_INCLUDE_FILE(cpu_features_macros.h HAVE_CPU_FEATURES)
+    message("-- Using system's cpu_features")
+    target_link_libraries(mayaqua PRIVATE cpu_features)
   else()
+    message("-- Using bundled cpu_features")
+    set(BUILD_SHARED_LIBS OFF)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
     add_subdirectory(3rdparty/cpu_features)
-    set_property(TARGET cpu_features PROPERTY POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(mayaqua PRIVATE cpu_features)
   endif()
 

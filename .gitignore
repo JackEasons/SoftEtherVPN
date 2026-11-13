@@ -2,6 +2,7 @@
 .cproject
 .project
 .settings/
+.vs/
 Makefile
 /src/bin/*
 !/src/bin/hamcore/
@@ -208,4 +209,11 @@ developer_tools/stbchecker/**/ASALocalRun/
 developer_tools/stbchecker/**/*.binlog
 developer_tools/stbchecker/**/*.nvuser
 developer_tools/stbchecker/**/.mfractor/
+/vcpkg_installed
 
+# Android / Gradle (SoftEtherVPN-Android)
+.gradle/
+.cxx/
+local.properties
+captures/
+.externalNativeBuild/

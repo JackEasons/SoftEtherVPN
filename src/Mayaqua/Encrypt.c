@@ -20,7 +20,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
+#endif
 #include <openssl/bio.h>
 #include <openssl/x509.h>
 #include <openssl/pkcs7.h>
@@ -38,6 +40,13 @@
 #include <openssl/pem.h>
 #include <openssl/conf.h>
 #include <openssl/x509v3.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/provider.h>
+// Static oqsprovider initialization function
+#ifndef SKIP_OQS_PROVIDER
+	extern OSSL_provider_init_fn oqs_provider_init;
+#endif
+#endif
 
 #ifdef _MSC_VER
 	#include <intrin.h> // For __cpuid()
@@ -81,6 +90,12 @@
 LOCK *openssl_lock = NULL;
 
 int ssl_clientcert_index = 0;
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static OSSL_PROVIDER *ossl_provider_legacy = NULL;
+static OSSL_PROVIDER *ossl_provider_default = NULL;
+static OSSL_PROVIDER *ossl_provider_oqsprovider = NULL;
+#endif
 
 LOCK **ssl_lock_obj = NULL;
 UINT ssl_lock_num;
@@ -336,6 +351,11 @@ MD *NewMdEx(char *name, bool hmac)
 #else
 		m->Ctx = EVP_MD_CTX_create();
 #endif
+		if (m->Ctx == NULL)
+		{
+			return NULL;
+		}
+
 		if (EVP_DigestInit_ex(m->Ctx, m->Md, NULL) == false)
 		{
 			Debug("NewMdEx(): EVP_DigestInit_ex() failed with error: %s\n", OpenSSL_Error());
@@ -704,7 +724,8 @@ UINT RsaPublicSize(K *k)
 // Hash a pointer to a 32-bit
 UINT HashPtrToUINT(void *p)
 {
-	UCHAR hash_data[MD5_SIZE];
+	UCHAR hash_data[SHA256_SIZE];
+	UCHAR hash_src[CANARY_RAND_SIZE + sizeof(void *)];
 	UINT ret;
 	// Validate arguments
 	if (p == NULL)
@@ -712,7 +733,11 @@ UINT HashPtrToUINT(void *p)
 		return 0;
 	}
 
-	Md5(hash_data, &p, sizeof(p));
+	Zero(hash_src, sizeof(hash_src));
+	Copy(hash_src + 0, GetCanaryRand(CANARY_RAND_ID_PTR_KEY_HASH), CANARY_RAND_SIZE);
+	Copy(hash_src + CANARY_RAND_SIZE, p, sizeof(void *));
+
+	Sha2_256(hash_data, hash_src, sizeof(hash_src));
 
 	Copy(&ret, hash_data, sizeof(ret));
 
@@ -1771,6 +1796,21 @@ X509 *NewX509(K *pub, K *priv, X *ca, NAME *name, UINT days, X_SERIAL *serial)
 
 	// Set the Serial Number
 	s = X509_get_serialNumber(x509);
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	if (serial == NULL)
+	{
+		ASN1_INTEGER_set(s, 0);
+	}
+	else
+	{
+		BIGNUM *bn = BN_bin2bn(serial->data, serial->size, NULL);
+		if (bn != NULL)
+		{
+			BN_to_ASN1_INTEGER(bn, s);
+			BN_free(bn);
+		}
+	}
+#else
 	OPENSSL_free(s->data);
 	if (serial == NULL)
 	{
@@ -1785,6 +1825,7 @@ X509 *NewX509(K *pub, K *priv, X *ca, NAME *name, UINT days, X_SERIAL *serial)
 		Copy(s->data, serial->data, serial->size);
 		s->length = serial->size;
 	}
+#endif
 
 	/*
 	// Extensions
@@ -1914,6 +1955,21 @@ X509 *NewRootX509(K *pub, K *priv, NAME *name, UINT days, X_SERIAL *serial)
 
 	// Set a Serial Number
 	s = X509_get_serialNumber(x509);
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	if (serial == NULL)
+	{
+		ASN1_INTEGER_set(s, 0);
+	}
+	else
+	{
+		BIGNUM *bn = BN_bin2bn(serial->data, serial->size, NULL);
+		if (bn != NULL)
+		{
+			BN_to_ASN1_INTEGER(bn, s);
+			BN_free(bn);
+		}
+	}
+#else
 	OPENSSL_free(s->data);
 	if (serial == NULL)
 	{
@@ -1928,6 +1984,7 @@ X509 *NewRootX509(K *pub, K *priv, NAME *name, UINT days, X_SERIAL *serial)
 		Copy(s->data, serial->data, serial->size);
 		s->length = serial->size;
 	}
+#endif
 
 	// Extensions
 	ex = X509V3_EXT_conf_nid(NULL, NULL, NID_basic_constraints,	"critical,CA:TRUE");
@@ -2155,6 +2212,9 @@ bool SystemToAsn1Time(void *asn1_time, SYSTEMTIME *s)
 		return false;
 	}
 	t = (ASN1_TIME *)asn1_time;
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+	return ASN1_TIME_set_string(t, tmp) != 0;
+#else
 	if (t->data == NULL || t->length < sizeof(tmp))
 	{
 		t->data = OPENSSL_malloc(sizeof(tmp));
@@ -2164,6 +2224,7 @@ bool SystemToAsn1Time(void *asn1_time, SYSTEMTIME *s)
 	t->type = V_ASN1_UTCTIME;
 
 	return true;
+#endif
 }
 
 // Convert the system time to a string
@@ -2203,6 +2264,12 @@ UINT64 Asn1TimeToUINT64(void *asn1_time)
 bool Asn1TimeToSystem(SYSTEMTIME *s, void *asn1_time)
 {
 	ASN1_TIME *t;
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	char tmp[32];
+	int len;
+	const char *src;
+	int type;
+#endif
 	// Validate arguments
 	if (s == NULL || asn1_time == NULL)
 	{
@@ -2210,6 +2277,29 @@ bool Asn1TimeToSystem(SYSTEMTIME *s, void *asn1_time)
 	}
 
 	t = (ASN1_TIME *)asn1_time;
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	len = ASN1_STRING_length((const ASN1_STRING *)t);
+	src = (const char *)ASN1_STRING_get0_data((const ASN1_STRING *)t);
+	type = ASN1_STRING_type((const ASN1_STRING *)t);
+
+	if (src == NULL || len <= 0 || len >= (int)sizeof(tmp))
+	{
+		return false;
+	}
+
+	Copy(tmp, src, len);
+	tmp[len] = '\0';
+
+	if (StrToSystem(s, tmp) == false)
+	{
+		return false;
+	}
+
+	if (type == V_ASN1_GENERALIZEDTIME)
+	{
+		LocalToSystem(s, s);
+	}
+#else
 	if (StrToSystem(s, (char *)t->data) == false)
 	{
 		return false;
@@ -2219,6 +2309,7 @@ bool Asn1TimeToSystem(SYSTEMTIME *s, void *asn1_time)
 	{
 		LocalToSystem(s, s);
 	}
+#endif
 
 	return true;
 }
@@ -2778,7 +2869,7 @@ wchar_t *GetUniStrFromX509Name(void *xn, int nid)
 	bool unicode = false;
 	bool is_utf_8 = false;
 	ASN1_OBJECT *obj;
-	ASN1_STRING *data;
+	const ASN1_STRING *data;
 	// Validate arguments
 	if (xn == NULL || nid == 0)
 	{
@@ -2806,6 +2897,16 @@ wchar_t *GetUniStrFromX509Name(void *xn, int nid)
 	{
 		return NULL;
 	}
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	if (ASN1_STRING_type(data) == V_ASN1_BMPSTRING)
+	{
+		unicode = true;
+	}
+	if (ASN1_STRING_type(data) == V_ASN1_UTF8STRING || ASN1_STRING_type(data) == V_ASN1_T61STRING)
+	{
+		is_utf_8 = true;
+	}
+#else
 	if (data->type == V_ASN1_BMPSTRING)
 	{
 		unicode = true;
@@ -2814,6 +2915,7 @@ wchar_t *GetUniStrFromX509Name(void *xn, int nid)
 	{
 		is_utf_8 = true;
 	}
+#endif
 
 	size = UniStrLen((wchar_t *)txt) * 4 + 8;
 	for (i = 0;i < size;i++)
@@ -3717,7 +3819,11 @@ X *X509ToX(X509 *x509)
 
 	// Get the Serial Number
 	s = X509_get_serialNumber(x509);
-	x->serial = NewXSerial(s->data, s->length);
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	x->serial = (s != NULL) ? NewXSerial((void *)ASN1_STRING_get0_data((const ASN1_STRING *)s), ASN1_STRING_length((const ASN1_STRING *)s)) : NULL;
+#else
+	x->serial = (s != NULL) ? NewXSerial(s->data, s->length) : NULL;
+#endif
 	if (x->serial == NULL)
 	{
 		char zero = 0;
@@ -3948,6 +4054,26 @@ void FreeCryptLibrary()
 	SSL_COMP_free_compression_methods();
 #endif
 #endif
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (ossl_provider_default != NULL)
+	{
+		OSSL_PROVIDER_unload(ossl_provider_default);
+		ossl_provider_default = NULL;
+	}
+
+	if (ossl_provider_legacy != NULL)
+	{
+		OSSL_PROVIDER_unload(ossl_provider_legacy);
+		ossl_provider_legacy = NULL;
+	}
+
+	if (ossl_provider_oqsprovider != NULL)
+	{
+		OSSL_PROVIDER_unload(ossl_provider_oqsprovider);
+		ossl_provider_oqsprovider = NULL;
+	}
+#endif
 }
 
 // Initialize the Crypt library
@@ -3964,6 +4090,18 @@ void InitCryptLibrary()
 	OpenSSL_add_all_digests();
 	ERR_load_crypto_strings();
 	SSL_load_error_strings();
+#endif
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	ossl_provider_default = OSSL_PROVIDER_load(NULL, "legacy");
+	ossl_provider_legacy = OSSL_PROVIDER_load(NULL, "default");
+
+	char *oqs_provider_name = "oqsprovider";
+	#ifndef SKIP_OQS_PROVIDER
+		// Registers "oqsprovider" as a provider -- necessary because oqsprovider is built in now.
+		OSSL_PROVIDER_add_builtin(NULL, oqs_provider_name, oqs_provider_init); 
+	#endif
+	ossl_provider_oqsprovider = OSSL_PROVIDER_load(NULL, oqs_provider_name);
 #endif
 
 	ssl_clientcert_index = SSL_get_ex_new_index(0, "struct SslClientCertInfo *", NULL, NULL, NULL);
@@ -4405,9 +4543,13 @@ bool IsAesNiSupported()
 
 	// Unfortunately OpenSSL doesn't provide a function to do it
 #ifdef _MSC_VER
-	int regs[4]; // EAX, EBX, ECX, EDX
-	__cpuid(regs, 1);
-	supported = (regs[2] >> 25) & 1;
+  #if defined(_M_X64) || defined(_M_IX86)
+    int regs[4]; // EAX, EBX, ECX, EDX
+    __cpuid(regs, 1);
+    supported = (regs[2] >> 25) & 1;
+  #elif defined(_M_ARM64)
+	return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE);
+  #endif
 #else // _MSC_VER
 	#if defined(CPU_FEATURES_ARCH_X86)
 		const X86Features features = GetX86Info().features;
@@ -4552,6 +4694,11 @@ DH_CTX *DhNew(char *prime, UINT g)
 	dh = ZeroMalloc(sizeof(DH_CTX));
 
 	dh->dh = DH_new();
+	if (dh->dh == NULL)
+	{
+		return NULL;
+	}
+	
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
 	dhp = BinToBigNum(buf->Buf, buf->Size);
 	dhg = BN_new();
@@ -4695,7 +4842,7 @@ static void MY_SHA0_Transform(MY_SHA0_CTX* ctx) {
 	UCHAR* p = ctx->buf;
 	int t;
 	for(t = 0; t < 16; ++t) {
-		UINT tmp =  *p++ << 24;
+		UINT tmp =  (UINT)*p++ << 24;
 		tmp |= *p++ << 16;
 		tmp |= *p++ << 8;
 		tmp |= *p++;
